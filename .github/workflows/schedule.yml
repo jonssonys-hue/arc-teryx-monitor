@@ -5,17 +5,11 @@ on:
     - cron: '0 */12 * * *'
   workflow_dispatch:
 
-permissions:
-  contents: write
-
 jobs:
   monitor:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
-        with:
-          ref: main
-          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Python
         uses: actions/setup-python@v4
@@ -28,12 +22,10 @@ jobs:
       - name: Run monitor
         run: python monitor.py
 
-      - name: Commit results
-        run: |
-          git config user.name "github-actions"
-          git config user.email "actions@github.com"
-          git add deals.json index.html
-          git diff --staged --quiet || git commit -m "Update deals $(date -u)"
-          git push
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: arcteryx-deals
+          path: |
+            deals.json
+            index.html
