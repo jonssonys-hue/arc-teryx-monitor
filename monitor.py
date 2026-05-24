@@ -3,15 +3,18 @@ from bs4 import BeautifulSoup
 import json
 import os
 from datetime import datetime
+import re
 
 SITES = [
     {
         "name": "Bushtukah",
-        "url": "https://bushtukah.com/search?gf_169380=Arcteryx&q=arc%27teryx&options%5Bprefix%5D=last"
+        "url": "https://bushtukah.com/search?gf_169380=Arcteryx&q=arc%27teryx&options%5Bprefix%5D=last",
+        "type": "shopify"
     },
     {
         "name": "Trailhead Paddle Shack",
-        "url": "https://www.trailheadpaddleshack.ca/search/arc%27teryx/"
+        "url": "https://www.trailheadpaddleshack.ca/search/arc%27teryx/",
+        "type": "trailhead"
     }
 ]
 
@@ -21,57 +24,131 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 }
 
-def get_discounted_products(site):
+def extract_price(text):
+    """Extract numeric price from a string like C$94.99 or $189.99"""
+    if not text:
+        return None
+    text = text.replace(",", "")
+    match = re.search(r'[\d]+\.[\d]{2}', text)
+    if match:
+        return float(match.group())
+    return None
+
+def scrape_trailhead(site):
     results = []
     try:
         response = requests.get(site["url"], headers=HEADERS, timeout=15)
         soup = BeautifulSoup(response.text, "lxml")
 
-        # Look for products with both original and sale prices
-        products = soup.find_all(class_=lambda c: c and any(
-            x in c for x in ["product", "item", "card"]
-        ))
+        # Trailhead uses WooCommerce-style product listings
+        products = soup.find_all("li", class_=re.compile(r"product"))
 
         for product in products:
             try:
-                name_tag = product.find(["h2", "h3", "h4", "a"], class_=lambda c: c and "title" in str(c).lower())
+                # Product name
+                name_tag = product.find(["h2", "h3", "a"], class_=re.compile(r"woocommerce-loop-product__title|product.*title|entry-title", re.I))
+                if not name_tag:
+                    name_tag = product.find("a", class_=re.compile(r"title|name", re.I))
                 name = name_tag.get_text(strip=True) if name_tag else None
 
-                # Look for sale/compare price
-                compare_tag = product.find(class_=lambda c: c and any(
-                    x in str(c).lower() for x in ["compare", "original", "was", "regular"]
-                ))
-                sale_tag = product.find(class_=lambda c: c and any(
-                    x in str(c).lower() for x in ["sale", "price", "discounted"]
-                ))
+                # Prices
+                price_block = product.find(class_=re.compile(r"price"))
+                if not price_block:
+                    continue
 
-                if name and compare_tag and sale_tag:
-                    compare_text = compare_tag.get_text(strip=True).replace("$", "").replace(",", "").strip()
-                    sale_text = sale_tag.get_text(strip=True).replace("$", "").replace(",", "").strip()
+                price_text = price_block.get_text(separator=" ", strip=True)
 
-                    try:
-                        compare_price = float(''.join(filter(lambda x: x.isdigit() or x == '.', compare_text)))
-                        sale_price = float(''.join(filter(lambda x: x.isdigit() or x == '.', sale_text)))
+                # Look for del (original) and ins (sale) tags
+                original_tag = price_block.find("del")
+                sale_tag = price_block.find("ins")
 
-                        if compare_price > 0 and sale_price < compare_price:
-                            discount = (compare_price - sale_price) / compare_price
-                            if discount >= DISCOUNT_THRESHOLD:
-                                results.append({
-                                    "site": site["name"],
-                                    "name": name,
-                                    "original_price": compare_price,
-                                    "sale_price": sale_price,
-                                    "discount_pct": round(discount * 100, 1)
-                                })
-                    except (ValueError, ZeroDivisionError):
-                        pass
-            except Exception:
-                pass
+                if original_tag and sale_tag:
+                    original_price = extract_price(original_tag.get_text())
+                    sale_price = extract_price(sale_tag.get_text())
+                elif original_tag:
+                    original_price = extract_price(original_tag.get_text())
+                    sale_price = extract_price(price_text.replace(original_tag.get_text(), ""))
+                else:
+                    # Try to find two prices in the text
+                    prices = re.findall(r'[\d]+\.[\d]{2}', price_text.replace(",", ""))
+                    if len(prices) >= 2:
+                        original_price = float(max(prices, key=float))
+                        sale_price = float(min(prices, key=float))
+                    else:
+                        continue
+
+                if original_price and sale_price and original_price > 0 and sale_price < original_price:
+                    discount = (original_price - sale_price) / original_price
+                    if discount >= DISCOUNT_THRESHOLD:
+                        # Get product link
+                        link_tag = product.find("a", href=True)
+                        link = link_tag["href"] if link_tag else site["url"]
+
+                        results.append({
+                            "site": site["name"],
+                            "name": name or "Unknown Product",
+                            "original_price": original_price,
+                            "sale_price": sale_price,
+                            "discount_pct": round(discount * 100, 1),
+                            "link": link
+                        })
+            except Exception as e:
+                continue
 
     except Exception as e:
         print(f"Error fetching {site['name']}: {e}")
 
     return results
+
+def scrape_shopify(site):
+    results = []
+    try:
+        # Use Shopify JSON API for more reliable data
+        api_url = "https://bushtukah.com/search?q=arc%27teryx&view=json" 
+        response = requests.get(site["url"], headers=HEADERS, timeout=15)
+        soup = BeautifulSoup(response.text, "lxml")
+
+        products = soup.find_all(class_=re.compile(r"product-item|product-card|grid-item", re.I))
+
+        for product in products:
+            try:
+                name_tag = product.find(class_=re.compile(r"title|name", re.I))
+                name = name_tag.get_text(strip=True) if name_tag else None
+
+                compare_tag = product.find(class_=re.compile(r"compare|was|original|regular", re.I))
+                sale_tag = product.find(class_=re.compile(r"sale|price", re.I))
+
+                if compare_tag and sale_tag:
+                    original_price = extract_price(compare_tag.get_text())
+                    sale_price = extract_price(sale_tag.get_text())
+
+                    if original_price and sale_price and original_price > sale_price:
+                        discount = (original_price - sale_price) / original_price
+                        if discount >= DISCOUNT_THRESHOLD:
+                            link_tag = product.find("a", href=True)
+                            link = "https://bushtukah.com" + link_tag["href"] if link_tag else site["url"]
+
+                            results.append({
+                                "site": site["name"],
+                                "name": name or "Unknown Product",
+                                "original_price": original_price,
+                                "sale_price": sale_price,
+                                "discount_pct": round(discount * 100, 1),
+                                "link": link
+                            })
+            except Exception:
+                continue
+
+    except Exception as e:
+        print(f"Error fetching {site['name']}: {e}")
+
+    return results
+
+def get_discounted_products(site):
+    if site["type"] == "trailhead":
+        return scrape_trailhead(site)
+    else:
+        return scrape_shopify(site)
 
 def main():
     all_deals = []
@@ -91,27 +168,31 @@ def main():
     with open("deals.json", "w") as f:
         json.dump(output, f, indent=2)
 
-    # Generate simple HTML dashboard
+    # Generate HTML dashboard
     html = f"""<!DOCTYPE html>
 <html>
 <head>
   <title>Arc'teryx Deal Monitor</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <style>
-    body {{ font-family: Arial, sans-serif; max-width: 900px; margin: 40px auto; padding: 0 20px; }}
+    body {{ font-family: Arial, sans-serif; max-width: 900px; margin: 40px auto; padding: 0 20px; background: #f5f5f5; }}
     h1 {{ color: #2c3e50; }}
-    .meta {{ color: #888; margin-bottom: 30px; }}
-    .deal {{ border: 1px solid #ddd; border-radius: 8px; padding: 16px; margin-bottom: 16px; }}
+    .meta {{ color: #888; margin-bottom: 30px; font-size: 14px; }}
+    .deal {{ background: white; border-radius: 10px; padding: 18px; margin-bottom: 16px; box-shadow: 0 2px 6px rgba(0,0,0,0.08); }}
     .deal h3 {{ margin: 0 0 8px 0; color: #2c3e50; }}
-    .site {{ font-size: 12px; color: #888; margin-bottom: 4px; }}
-    .price {{ font-size: 18px; color: #e74c3c; font-weight: bold; }}
-    .original {{ text-decoration: line-through; color: #aaa; font-size: 14px; margin-left: 8px; }}
-    .badge {{ display: inline-block; background: #e74c3c; color: white; padding: 2px 8px; border-radius: 4px; font-size: 13px; margin-left: 8px; }}
-    .no-deals {{ color: #888; font-style: italic; }}
+    .site {{ font-size: 12px; color: #888; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 1px; }}
+    .price {{ font-size: 22px; color: #e74c3c; font-weight: bold; }}
+    .original {{ text-decoration: line-through; color: #aaa; font-size: 15px; margin-left: 10px; }}
+    .badge {{ display: inline-block; background: #e74c3c; color: white; padding: 3px 10px; border-radius: 20px; font-size: 13px; margin-left: 10px; font-weight: bold; }}
+    .link {{ display: inline-block; margin-top: 10px; color: #3498db; font-size: 13px; text-decoration: none; }}
+    .link:hover {{ text-decoration: underline; }}
+    .no-deals {{ background: white; border-radius: 10px; padding: 30px; text-align: center; color: #888; font-style: italic; }}
+    .header {{ display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }}
   </style>
 </head>
 <body>
   <h1>🏔️ Arc'teryx Deal Monitor</h1>
-  <div class="meta">Last checked: {output['last_checked']} &nbsp;|&nbsp; {output['total_deals']} deal(s) found (≥20% off)</div>
+  <div class="meta">Last checked: {output['last_checked']} &nbsp;·&nbsp; <strong>{output['total_deals']} deal(s)</strong> found with ≥20% off</div>
 """
 
     if all_deals:
@@ -120,12 +201,14 @@ def main():
   <div class="deal">
     <div class="site">{deal['site']}</div>
     <h3>{deal['name']}</h3>
-    <span class="price">${deal['sale_price']:.2f}</span>
-    <span class="original">${deal['original_price']:.2f}</span>
+    <span class="price">C${deal['sale_price']:.2f}</span>
+    <span class="original">C${deal['original_price']:.2f}</span>
     <span class="badge">-{deal['discount_pct']}%</span>
+    <br>
+    <a class="link" href="{deal['link']}" target="_blank">View product →</a>
   </div>"""
     else:
-        html += '<p class="no-deals">No deals found today with 20% or more off.</p>'
+        html += '<div class="no-deals">No deals found today with 20% or more off. Check back later!</div>'
 
     html += "\n</body>\n</html>"
 
