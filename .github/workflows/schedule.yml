@@ -14,7 +14,8 @@ jobs:
     steps:
       - uses: actions/checkout@v3
         with:
-          fetch-depth: 0
+          ref: main
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Python
         uses: actions/setup-python@v4
@@ -33,4 +34,6 @@ jobs:
           git config user.email "actions@github.com"
           git add deals.json index.html
           git diff --staged --quiet || git commit -m "Update deals $(date -u)"
-          git push --force-with-lease origin main
+          git push
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
