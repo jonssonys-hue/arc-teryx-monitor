@@ -33,4 +33,4 @@ jobs:
           git config user.email "actions@github.com"
           git add deals.json index.html
           git diff --staged --quiet || git commit -m "Update deals $(date -u)"
-          git push origin HEAD:main --force
+          git push --force-with-lease origin main
